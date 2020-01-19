@@ -1,18 +1,20 @@
+// Taken from https://github.com/mikeash/memorydumper2/blob/master/memorydumper2/main.swift
+// Updated for Swift 5 and SPM'ed (rnapier)
 
 import AppKit
-
+import CMemory
 
 struct Pointer {
     var address: UInt
-    
+
     init(_ address: UInt) {
         self.address = address
     }
-    
+
     init(_ ptr: UnsafeRawPointer) {
         address = UInt(bitPattern: ptr)
     }
-    
+
     var voidPtr: UnsafeRawPointer? {
         return UnsafeRawPointer(bitPattern: address)
     }
@@ -25,18 +27,18 @@ extension Pointer: CustomStringConvertible {
 }
 
 extension Pointer: Hashable {
-    var hashValue: Int {
-        return address.hashValue
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(address.hashValue)
     }
-    
+
     static func ==(lhs: Pointer, rhs: Pointer) -> Bool {
         return lhs.address == rhs.address
     }
-    
+
     static func +(lhs: Pointer, rhs: UInt) -> Pointer {
         return Pointer(lhs.address + rhs)
     }
-    
+
     static func -(lhs: Pointer, rhs: Pointer) -> UInt {
         return lhs.address - rhs.address
     }
@@ -90,12 +92,12 @@ func demangle(_ string: String, tool: [String]) -> String {
     let task = Process()
     task.launchPath = "/usr/bin/xcrun"
     task.arguments = tool
-    
+
     let inPipe = Pipe()
     let outPipe = Pipe()
     task.standardInput = inPipe
     task.standardOutput = outPipe
-    
+
     task.launch()
     DispatchQueue.global().async(execute: {
         inPipe.fileHandleForWriting.write(string.data(using: .utf8)!)
@@ -109,7 +111,7 @@ extension mach_vm_address_t {
     init(_ ptr: UnsafeRawPointer?) {
         self.init(UInt(bitPattern: ptr))
     }
-    
+
     init(_ ptr: Pointer) {
         self.init(ptr.address)
     }
@@ -162,7 +164,7 @@ func objcClassName(ptr: Pointer) -> String? {
         static let classMap: [Pointer: AnyClass] = {
             var classCount: UInt32 = 0
             let list = objc_copyClassList(&classCount)!
-            
+
             var map: [Pointer: AnyClass] = [:]
             for i in 0 ..< classCount {
                 let classObj: AnyClass = list[Int(i)]
@@ -172,14 +174,14 @@ func objcClassName(ptr: Pointer) -> String? {
             return map
         }()
     }
-    
+
     return Static.classMap[ptr].map({ NSStringFromClass($0) })
 }
 
 func objcInstanceClassName(ptr: Pointer) -> String? {
     let isaBytes = safeRead(ptr: ptr, limit: MemoryLayout<Pointer>.size)
     guard isaBytes.count >= MemoryLayout<Pointer>.size else { return nil }
-    
+
     let isa = isaBytes.withUnsafeBufferPointer({ buffer -> Pointer in
         return buffer.baseAddress!.withMemoryRebound(to: Pointer.self, capacity: 1, { $0.pointee })
     })
@@ -195,15 +197,15 @@ struct Memory {
     var buffer: [UInt8]
     var isMalloc: Bool
     var symbolName: String?
-    
+
     init(buffer: [UInt8]) {
         self.buffer = buffer
         self.isMalloc = false
     }
-    
+
     init?(ptr: Pointer, knownSize: UInt? = nil) {
         let mallocLength = UInt(malloc_size(ptr.voidPtr))
-        
+
         isMalloc = mallocLength > 0
         symbolName = symbolInfo(ptr).flatMap({
             if let name = $0.dli_sname {
@@ -212,7 +214,7 @@ struct Memory {
                 return nil
             }
         })
-        
+
         let length = knownSize ?? symbolLength(ptr: ptr, limit: 4096) ?? mallocLength
         if length > 0 || knownSize == 0 {
             buffer = Array(repeating: 0, count: Int(length))
@@ -227,7 +229,7 @@ struct Memory {
             }
         }
     }
-    
+
     func scanPointers() -> [PointerAndOffset] {
         return buffer.withUnsafeBufferPointer({ bufferPointer in
             return bufferPointer.baseAddress?.withMemoryRebound(to: Pointer.self, capacity: bufferPointer.count / MemoryLayout<Pointer>.size, {
@@ -236,11 +238,11 @@ struct Memory {
             }) ?? []
         })
     }
-    
+
     func scanStrings() -> [String] {
         let lowerBound: UInt8 = 32
         let upperBound: UInt8 = 126
-        
+
         let pieces = buffer.split(whereSeparator: { !(lowerBound ... upperBound ~= $0) })
         let sufficientlyLongPieces = pieces.filter({ $0.count >= 4 })
         return sufficientlyLongPieces.map({ String(bytes: $0, encoding: .utf8)! })
@@ -253,13 +255,13 @@ class MemoryRegion {
     let memory: Memory
     var children: [Child] = []
     var didScan = false
-    
+
     init(depth: Int, pointer: Pointer, memory: Memory) {
         self.depth = depth
         self.pointer = pointer
         self.memory = memory
     }
-    
+
     struct Child {
         var offset: Int
         var region: MemoryRegion
@@ -267,8 +269,8 @@ class MemoryRegion {
 }
 
 extension MemoryRegion: Hashable {
-    var hashValue: Int {
-        return pointer.hashValue
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(pointer.hashValue)
     }
 }
 
@@ -280,13 +282,13 @@ func buildMemoryRegionTree(ptr: UnsafeRawPointer, knownSize: UInt?, maxDepth: In
     let memory = Memory(ptr: Pointer(ptr), knownSize: knownSize)
     let maybeRootRegion = memory.map({ MemoryRegion(depth: 1, pointer: Pointer(ptr), memory: $0) })
     guard let rootRegion = maybeRootRegion else { return [] }
-    
+
     var allRegions: [Pointer: MemoryRegion] = [rootRegion.pointer: rootRegion]
-    
+
     var toScan: Set = [rootRegion]
     while let region = toScan.popFirst() {
         if region.didScan || region.depth >= maxDepth { continue }
-        
+
         let childPointers = region.memory.scanPointers()
         for pointerAndOffset in childPointers {
             let pointer = pointerAndOffset.pointer
@@ -303,7 +305,7 @@ func buildMemoryRegionTree(ptr: UnsafeRawPointer, knownSize: UInt?, maxDepth: In
         }
         region.didScan = true
     }
-    
+
     return Array(allRegions.values)
 }
 
@@ -311,7 +313,7 @@ enum DumpOptions {
     case all
     case some(Set<String>)
     case getAvailable((String) -> Void)
-    
+
     static let processOptions: DumpOptions = {
         let parameters = CommandLine.arguments.dropFirst()
         if parameters.count == 0 {
@@ -349,14 +351,14 @@ func dumpAndOpenGraph(dumping ptr: UnsafeRawPointer, knownSize: UInt?, maxDepth:
         result += string
         result += "\n"
     }
-    
+
     func graphvizNodeName(region: MemoryRegion) -> String {
         let s = String(describing: region.pointer)
         return "_" + s[ s.index(s.startIndex, offsetBy: 2)...]
     }
-    
+
     let regions = buildMemoryRegionTree(ptr: ptr, knownSize: knownSize, maxDepth: maxDepth)
-    
+
     line("digraph memory_dump_graph {")
     line("graph [bgcolor=black]")
     for region in regions {
@@ -373,27 +375,27 @@ func dumpAndOpenGraph(dumping ptr: UnsafeRawPointer, knownSize: UInt?, maxDepth:
         } else {
             labelName = "unknown"
         }
-        
+
         var label = "\(labelName) \(region.pointer) (\(region.memory.buffer.count) bytes)\n\(memoryString)"
-        
+
         let strings = region.memory.scanStrings()
         if strings.count > 0 {
             label += "\nStrings:\n"
             label += strings.joined(separator: "\n")
         }
-        
+
         let escaped = label
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
-        
+
         line("\(graphvizNodeName(region: region)) [style=filled] [fillcolor=white] [label=\"\(escaped)\"]")
-        
+
         for child in region.children {
             line("\(graphvizNodeName(region: region)) -> \(graphvizNodeName(region: child.region)) [color=white] [fontcolor=white] [label=\"@\(child.offset)\"]")
         }
     }
     line("}")
-    
+
     let path = "/tmp/\(filename).dot"
     try! result.write(toFile: path, atomically: false, encoding: .utf8)
     NSWorkspace.shared.openFile(path, withApplication: "Graphviz")
@@ -407,176 +409,3 @@ func dumpAndOpenGraph<T>(dumping value: T, maxDepth: Int, filename: String) {
 func dumpAndOpenGraph(dumping object: AnyObject, maxDepth: Int, filename: String) {
     dumpAndOpenGraph(dumping: unsafeBitCast(object, to: UnsafeRawPointer.self), knownSize: nil, maxDepth: maxDepth, filename: filename)
 }
-
-
-// Dumping of sample objects follows from here.
-
-protocol P {
-    func f()
-    func g()
-    func h()
-}
-
-struct EmptyStruct {}
-dumpAndOpenGraph(dumping: EmptyStruct(), maxDepth: 60, filename: "Empty struct")
-
-class EmptyClass {}
-dumpAndOpenGraph(dumping: EmptyClass(), maxDepth: 60, filename: "Empty class")
-
-class EmptyObjCClass: NSObject {}
-dumpAndOpenGraph(dumping: EmptyObjCClass(), maxDepth: 60, filename: "Empty ObjC Class")
-
-struct SimpleStruct {
-    var x: Int = 1
-    var y: Int = 2
-    var z: Int = 3
-}
-dumpAndOpenGraph(dumping: SimpleStruct(), maxDepth: 60, filename: "Simple struct")
-
-class SimpleClass {
-    var x: Int = 1
-    var y: Int = 2
-    var z: Int = 3
-}
-dumpAndOpenGraph(dumping: SimpleClass(), maxDepth: 6, filename: "Simple class")
-
-struct StructWithPadding {
-    var a: UInt8 = 1
-    var b: UInt8 = 2
-    var c: UInt8 = 3
-    var d: UInt16 = 4
-    var e: UInt8 = 5
-    var f: UInt32 = 6
-    var g: UInt8 = 7
-    var h: UInt64 = 8
-}
-dumpAndOpenGraph(dumping: StructWithPadding(), maxDepth: 60, filename: "Struct with padding")
-
-class ClassWithPadding {
-    var a: UInt8 = 1
-    var b: UInt8 = 2
-    var c: UInt8 = 3
-    var d: UInt16 = 4
-    var e: UInt8 = 5
-    var f: UInt32 = 6
-    var g: UInt8 = 7
-    var h: UInt64 = 8
-}
-dumpAndOpenGraph(dumping: ClassWithPadding(), maxDepth: 60, filename: "Class with padding")
-
-class DeepClassSuper1 {
-    var a = 1
-}
-class DeepClassSuper2: DeepClassSuper1 {
-    var b = 2
-}
-class DeepClassSuper3: DeepClassSuper2 {
-    var c = 3
-}
-class DeepClass: DeepClassSuper3 {
-    var d = 4
-}
-dumpAndOpenGraph(dumping: DeepClass(), maxDepth: 60, filename: "Deep class")
-
-dumpAndOpenGraph(dumping: [1, 2, 3, 4, 5], maxDepth: 4, filename: "Integer array")
-
-struct StructSmallP: P {
-    func f() {}
-    func g() {}
-    func h() {}
-    var a = 0x6c6c616d73
-}
-struct StructBigP: P {
-    func f() {}
-    func g() {}
-    func h() {}
-    var a = 0x656772616c
-    var b = 0x1010101010101010
-    var c = 0x2020202020202020
-    var d = 0x3030303030303030
-}
-struct ClassP: P {
-    func f() {}
-    func g() {}
-    func h() {}
-    var a = 0x7373616c63
-    var b = 0x4040404040404040
-    var c = 0x5050505050505050
-    var d = 0x6060606060606060
-}
-struct ProtocolHolder {
-    var a: P
-    var b: P
-    var c: P
-}
-let holder = ProtocolHolder(a: StructSmallP(), b: StructBigP(), c: ClassP())
-dumpAndOpenGraph(dumping: holder, maxDepth: 4, filename: "Protocol types")
-
-enum SimpleEnum {
-    case A, B, C, D, E
-}
-struct SimpleEnumHolder {
-    var a: SimpleEnum
-    var b: SimpleEnum
-    var c: SimpleEnum
-    var d: SimpleEnum
-    var e: SimpleEnum
-}
-dumpAndOpenGraph(dumping: SimpleEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "Simple enum")
-
-enum IntRawValueEnum: Int {
-    case A = 1, B, C, D, E
-}
-struct IntRawValueEnumHolder {
-    var a: IntRawValueEnum
-    var b: IntRawValueEnum
-    var c: IntRawValueEnum
-    var d: IntRawValueEnum
-    var e: IntRawValueEnum
-}
-dumpAndOpenGraph(dumping: IntRawValueEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "Int raw value enum")
-
-enum StringRawValueEnum: String {
-    case A = "whatever", B, C, D, E
-}
-struct StringRawValueEnumHolder {
-    var a: StringRawValueEnum
-    var b: StringRawValueEnum
-    var c: StringRawValueEnum
-    var d: StringRawValueEnum
-    var e: StringRawValueEnum
-}
-dumpAndOpenGraph(dumping: StringRawValueEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "String raw value enum")
-
-enum OneAssociatedObjectEnum {
-    case A(AnyObject)
-    case B, C, D, E
-}
-struct OneAssociatedObjectEnumHolder {
-    var a: OneAssociatedObjectEnum
-    var b: OneAssociatedObjectEnum
-    var c: OneAssociatedObjectEnum
-    var d: OneAssociatedObjectEnum
-    var e: OneAssociatedObjectEnum
-}
-dumpAndOpenGraph(dumping: OneAssociatedObjectEnumHolder(a: .A(NSObject()), b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "One associated object enum")
-
-enum ManyAssociatedObjectsEnum {
-    case A(AnyObject)
-    case B(AnyObject)
-    case C(AnyObject)
-    case D(AnyObject)
-    case E(AnyObject)
-}
-struct ManyAssociatedObjectsEnumHolder {
-    var a: ManyAssociatedObjectsEnum
-    var b: ManyAssociatedObjectsEnum
-    var c: ManyAssociatedObjectsEnum
-    var d: ManyAssociatedObjectsEnum
-    var e: ManyAssociatedObjectsEnum
-}
-dumpAndOpenGraph(dumping: ManyAssociatedObjectsEnumHolder(a: .A(NSObject()), b: .B(NSObject()), c: .C(NSObject()), d: .D(NSObject()), e: .E(NSObject())), maxDepth: 5, filename: "Many associated objects enum")
-
-DumpCMemory({ (pointer: UnsafeRawPointer?, knownSize: Int, maxDepth: Int, name: UnsafePointer<Int8>?) in
-    dumpAndOpenGraph(dumping: pointer!, knownSize: UInt(knownSize), maxDepth: maxDepth, filename: String(cString: name!))
-})
